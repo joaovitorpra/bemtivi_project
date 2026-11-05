@@ -12,12 +12,14 @@ import {
   Gauge,
   UserRound
 } from 'lucide-react';
-import { buscarComIA, listarProjetos, listarEquipes, listarTalentos } from './services/api';
+import { buscarComIA, listarProjetos, listarEquipes, listarTalentos, projecaoDisponibilidade } from './services/api';
 import { useApi } from './hooks/useApi';
 import { Avatar, EstadoDaPagina } from './components/Comum';
 import Utilizacao from './pages/Utilizacao';
 import Perfil from './pages/Perfil';
 import Alocar from './pages/Alocar';
+import Contatar from './pages/Contatar';
+import ProximosMeses from './components/ProximosMeses';
 
 const TITULOS_PAGINA = {
   ia: 'Assistente de IA',
@@ -26,7 +28,8 @@ const TITULOS_PAGINA = {
   equipes: 'Equipes',
   talentos: 'Talentos',
   perfil: 'Perfil do profissional',
-  alocar: 'Alocar profissional'
+  alocar: 'Alocar profissional',
+  contatar: 'Contatar talento'
 };
 
 // Selo da situação do planejamento de cada colaborador no mês atual
@@ -105,7 +108,9 @@ export default function App() {
 
   // Perfil e alocação: guarda o candidato escolhido na busca
   const [pessoaSelecionada, setPessoaSelecionada] = useState(null);
+  const [paginaDeOrigem, setPaginaDeOrigem] = useState('ia'); // para onde o "Voltar" leva
   const [resumoMes, setResumoMes] = useState([]);
+  const [projecao, setProjecao] = useState(null); // disponibilidade dos próximos meses (todos os colaboradores)
 
   // Dados das páginas (carregados da API ao abrir cada página)
   const projetos = useApi(carregarProjetos, currentPage === 'projetos');
@@ -158,6 +163,89 @@ export default function App() {
     criterios?.period
   ].filter(Boolean).join(' · ');
 
+  // Projeção dos próximos 4 meses (mês atual + 3). Carregada na primeira busca
+  // e recarregada depois de cada alocação.
+  const carregarProjecao = () => {
+    projecaoDisponibilidade(4)
+      .then((p) => setProjecao(p.mapas.some((m) => m && m.size > 0) ? p : { indisponivel: true }))
+      .catch(() => setProjecao({ indisponivel: true }));
+  };
+
+  // % livre de um candidato no mês atual (talento sem número = 100%, pois está no mercado)
+  const livreAgora = (person) => {
+    if (typeof person.availability === 'number') return person.availability;
+    return person.source === 'INTERNO' ? null : 100;
+  };
+
+  // Linha do tempo de um colaborador interno: [{ano, mes, livre}] ou null se não houver dados
+  const mesesDoCandidato = (person) => {
+    if (person.source !== 'INTERNO' || !projecao?.meses) return null;
+    return projecao.meses.map((m, i) => {
+      if (i === 0 && typeof person.availability === 'number') return { ...m, livre: person.availability };
+      const mapa = projecao.mapas[i];
+      return { ...m, livre: mapa && mapa.has(String(person.id)) ? mapa.get(String(person.id)) : null };
+    });
+  };
+
+  // Resumo calculado só com os profissionais encontrados pela IA (os dois bancos)
+  const resumoDaBusca = (() => {
+    const candidatos = analysisResult?.candidates;
+    if (!hasSearched || isLoading || !candidatos?.length) return null;
+    const internos = candidatos.filter((c) => c.source === 'INTERNO');
+    const talentos = candidatos.filter((c) => c.source !== 'INTERNO');
+    const ehParcial = (v) => v !== null && v > 0 && v < 100;
+
+    const livres = candidatos.filter((c) => livreAgora(c) >= 100);
+    const parciais = candidatos.filter((c) => ehParcial(livreAgora(c)));
+    const mediaLivreParciais = parciais.length
+      ? Math.round(parciais.reduce((soma, c) => soma + livreAgora(c), 0) / parciais.length)
+      : null;
+
+    const linhas = internos.map(mesesDoCandidato).filter(Boolean);
+    let mediaParciaisFuturo = null;
+    let liberamEmBreve = null;
+    if (linhas.length) {
+      const talentosParciais = talentos.filter((c) => ehParcial(livreAgora(c))).length;
+      const futuros = [1, 2, 3].filter((i) => i < linhas[0].length);
+      const porMes = futuros.map((i) => linhas.filter((l) => ehParcial(l[i].livre)).length + talentosParciais);
+      mediaParciaisFuturo = porMes.length ? porMes.reduce((a, b) => a + b, 0) / porMes.length : null;
+      liberamEmBreve = linhas.filter((l) => (l[0].livre ?? 0) < 100 && l.slice(1).some((m) => m.livre !== null && m.livre >= 100)).length;
+    }
+
+    const fmt = (n) => n.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+    return [
+      {
+        rotulo: 'Livres agora',
+        valor: livres.length,
+        detalhe: `${livres.filter((c) => c.source === 'INTERNO').length} internos · ${livres.filter((c) => c.source !== 'INTERNO').length} talentos`,
+        cor: 'text-emerald-300'
+      },
+      {
+        rotulo: 'Parcialmente disponíveis',
+        valor: parciais.length,
+        detalhe: [
+          mediaLivreParciais !== null ? `${mediaLivreParciais}% livre em média` : null,
+          mediaParciaisFuturo !== null ? `média de ${fmt(mediaParciaisFuturo)}/mês nos próximos 3 meses` : null
+        ].filter(Boolean).join(' · ') || 'nos dois bancos',
+        cor: 'text-amber-300'
+      },
+      liberamEmBreve !== null && {
+        rotulo: 'Ficam livres em breve',
+        valor: liberamEmBreve,
+        detalhe: 'internos que chegam a 100% livre nos próximos 3 meses',
+        cor: 'text-cyan-300'
+      },
+      {
+        rotulo: 'Banco de Talentos',
+        valor: talentos.length,
+        detalhe: talentos.length ? 'externos compatíveis com a busca' : 'não foi preciso acionar',
+        cor: 'text-white'
+      }
+    ].filter(Boolean);
+  })();
+
+  const cardsResumo = resumoDaBusca || resumoMes;
+
   // Execução da Busca Inteligente
   const executeSearch = async (queryText) => {
     const query = queryText || searchQuery;
@@ -171,6 +259,7 @@ export default function App() {
       // Chamada para a API Python (backend FastAPI)
       const data = await buscarComIA(query);
       setAnalysisResult(data);
+      if (!projecao) carregarProjecao();
     } catch (err) {
       setAnalysisResult(null);
       setSearchError(err.message);
@@ -184,9 +273,6 @@ export default function App() {
     setTimeout(() => setActionFeedback(null), 6000);
   };
 
-  const contatarTalento = (person) => {
-    mostrarFeedback({ tipo: 'ok', texto: `Solicitação de contratação enviada para ${person.name} no Banco de Talentos!` });
-  };
 
   const navigateTo = (page) => {
     setCurrentPage(page);
@@ -194,21 +280,42 @@ export default function App() {
     window.scrollTo({ top: 0 });
   };
 
+  const lembrarOrigem = () => {
+    if (['ia', 'talentos', 'equipes'].includes(currentPage)) setPaginaDeOrigem(currentPage);
+  };
+
+  const voltar = () => navigateTo(paginaDeOrigem);
+
   const abrirPerfil = (person) => {
+    lembrarOrigem();
     setPessoaSelecionada(person);
     navigateTo('perfil');
   };
 
   const abrirAlocacao = (person) => {
+    lembrarOrigem();
     setPessoaSelecionada(person);
     navigateTo('alocar');
   };
 
+  const abrirContato = (person) => {
+    lembrarOrigem();
+    setPessoaSelecionada(person);
+    navigateTo('contatar');
+  };
+
+  // Depois de enviar o convite a um talento, volta aos resultados com o aviso
+  const concluirContato = (feedback) => {
+    navigateTo(paginaDeOrigem);
+    mostrarFeedback(feedback);
+  };
+
   // Ao terminar a alocação, volta para os resultados da busca com o aviso
   const concluirAlocacao = (feedback) => {
-    navigateTo('ia');
+    navigateTo(paginaDeOrigem);
     mostrarFeedback(feedback);
-    if (searchQuery.trim()) executeSearch(searchQuery); // atualiza a disponibilidade nos cards
+    if (paginaDeOrigem === 'ia' && searchQuery.trim()) executeSearch(searchQuery); // atualiza a disponibilidade nos cards
+    carregarProjecao();
   };
 
   return (
@@ -343,6 +450,23 @@ export default function App() {
         )}
       </header>
 
+      {/* Aviso flutuante (quando a ação termina fora da página do Assistente) */}
+      {actionFeedback && currentPage !== 'ia' && (
+        <div
+          role="status"
+          className={`fixed bottom-6 right-6 left-6 sm:left-auto sm:max-w-md z-50 p-4 rounded-xl flex items-center gap-3 text-sm font-medium border shadow-2xl ${
+            actionFeedback.tipo === 'aviso'
+              ? 'bg-amber-950/95 border-amber-500/40 text-amber-200'
+              : 'bg-emerald-950/95 border-emerald-500/40 text-emerald-200'
+          }`}
+        >
+          {actionFeedback.tipo === 'aviso'
+            ? <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+            : <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
+          <span>{actionFeedback.texto}</span>
+        </div>
+      )}
+
       {/* ÁREA PRINCIPAL */}
       <main className="flex-1 w-full max-w-6xl mx-auto px-6 relative z-10 py-10 md:py-14 space-y-10">
         {/* PÁGINA 1: ASSISTENTE DE IA (modelo A — busca em destaque) */}
@@ -398,15 +522,26 @@ export default function App() {
               </div>
             </section>
 
-            {/* RESUMO DO MÊS */}
-            {resumoMes.length > 0 && (
-              <section aria-label="Resumo do mês" className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                {resumoMes.map((k) => (
-                  <div key={k.rotulo} className="p-5 bg-[#15101F] border border-[#241C36] rounded-2xl flex flex-col gap-1.5">
-                    <span className="text-[13px] text-slate-400">{k.rotulo}</span>
-                    <span className={`text-3xl font-semibold ${k.cor}`}>{k.valor}</span>
-                  </div>
-                ))}
+            {/* RESUMO: geral antes da busca, da busca depois de pesquisar */}
+            {cardsResumo.length > 0 && (
+              <section aria-label={resumoDaBusca ? 'Resumo desta busca' : 'Resumo do mês'} className="space-y-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                    {resumoDaBusca ? 'Resumo desta busca' : 'Resumo geral do mês'}
+                  </h2>
+                  {resumoDaBusca && projecao?.indisponivel && (
+                    <span className="text-[11px] text-slate-500">Projeção dos próximos meses indisponível</span>
+                  )}
+                </div>
+                <div className={`grid grid-cols-2 gap-4 ${cardsResumo.length === 3 ? 'lg:grid-cols-3' : 'lg:grid-cols-4'}`}>
+                  {cardsResumo.map((k) => (
+                    <div key={k.rotulo} className="p-5 bg-[#15101F] border border-[#241C36] rounded-2xl flex flex-col gap-1.5">
+                      <span className="text-[13px] text-slate-400">{k.rotulo}</span>
+                      <span className={`text-3xl font-semibold ${k.cor}`}>{k.valor}</span>
+                      {k.detalhe && <span className="text-[11px] text-slate-500 leading-snug">{k.detalhe}</span>}
+                    </div>
+                  ))}
+                </div>
               </section>
             )}
 
@@ -509,6 +644,8 @@ export default function App() {
                             <p className="text-slate-400">Disponibilidade: <strong className="text-emerald-400">{person.freeDate}</strong></p>
                           </div>
 
+                          {isInternal && mesesDoCandidato(person) && <ProximosMeses meses={mesesDoCandidato(person)} />}
+
                           {person.reason && (
                             <p className="text-xs text-slate-400 leading-relaxed">
                               <strong className="text-purple-300">Análise da IA:</strong> {person.reason}
@@ -534,13 +671,22 @@ export default function App() {
                                 </button>
                               </>
                             ) : (
-                              <button
-                                onClick={() => contatarTalento(person)}
-                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition cursor-pointer"
-                              >
-                                <Send className="w-3.5 h-3.5" />
-                                Contatar para Contratar
-                              </button>
+                              <>
+                                <button
+                                  onClick={() => abrirPerfil(person)}
+                                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-200 border border-cyan-500/30 hover:bg-white/5 transition cursor-pointer"
+                                >
+                                  <UserRound className="w-3.5 h-3.5" />
+                                  Ver perfil
+                                </button>
+                                <button
+                                  onClick={() => abrirContato(person)}
+                                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition cursor-pointer"
+                                >
+                                  <Send className="w-3.5 h-3.5" />
+                                  Contatar
+                                </button>
+                              </>
                             )}
                           </div>
                         </article>
@@ -558,12 +704,22 @@ export default function App() {
 
         {/* PÁGINA: PERFIL DO PROFISSIONAL */}
         {currentPage === 'perfil' && pessoaSelecionada && (
-          <Perfil pessoa={pessoaSelecionada} onVoltar={() => navigateTo('ia')} onAlocar={abrirAlocacao} />
+          <Perfil
+            pessoa={pessoaSelecionada}
+            onVoltar={voltar}
+            onAlocar={abrirAlocacao}
+            onContatar={abrirContato}
+          />
         )}
 
         {/* PÁGINA: ALOCAR COM E-MAIL */}
         {currentPage === 'alocar' && pessoaSelecionada && (
-          <Alocar pessoa={pessoaSelecionada} onVoltar={() => navigateTo('ia')} onConcluido={concluirAlocacao} />
+          <Alocar pessoa={pessoaSelecionada} onVoltar={voltar} onConcluido={concluirAlocacao} />
+        )}
+
+        {/* PÁGINA: CONTATAR TALENTO EXTERNO (e-mail de convite) */}
+        {currentPage === 'contatar' && pessoaSelecionada && (
+          <Contatar pessoa={pessoaSelecionada} onVoltar={voltar} onConcluido={concluirContato} />
         )}
 
         {/* PÁGINA 2: PROJETOS */}
@@ -671,10 +827,22 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <button className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-2">
-                    <Send className="w-3.5 h-3.5" />
-                    Contatar para Contratar
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => abrirPerfil({ ...t, source: 'TALENTO' })}
+                      className="flex-1 border border-cyan-500/30 hover:bg-white/5 text-slate-200 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
+                    >
+                      <UserRound className="w-3.5 h-3.5" />
+                      Ver perfil
+                    </button>
+                    <button
+                      onClick={() => abrirContato({ ...t, source: 'TALENTO' })}
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      Contatar
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

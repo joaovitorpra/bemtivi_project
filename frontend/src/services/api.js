@@ -77,8 +77,16 @@ function comoLista(resposta, ...chaves) {
 
 // Detalhe do colaborador (GET /colaboradores/{id}): e-mail e skills com nível.
 export async function obterColaborador(id) {
-  const c = await request(`/colaboradores/${id}`);
-  const skills = comoLista(pegar(c, 'skills', 'colaborador_skills') || []).map((s) =>
+  return normalizarPessoa(await request(`/colaboradores/${id}`));
+}
+
+// Detalhe do talento externo (GET /talentos/{id}).
+export async function obterTalento(id) {
+  return normalizarPessoa(await request(`/talentos/${id}`));
+}
+
+function normalizarPessoa(c) {
+  const skills = comoLista(pegar(c, 'skills', 'colaborador_skills', 'talento_skills') || []).map((s) =>
     typeof s === 'string'
       ? { nome: s, nivel: '' }
       : {
@@ -87,9 +95,11 @@ export async function obterColaborador(id) {
         }
   );
   return {
-    id: pegar(c, 'id', 'id_colaborador'),
+    id: pegar(c, 'id', 'id_colaborador', 'id_talento'),
     nome: texto(pegar(c, 'nome', 'name')),
     email: texto(pegar(c, 'email', 'e_mail')),
+    telefone: texto(pegar(c, 'telefone', 'celular', 'phone')),
+    linkedin: texto(pegar(c, 'linkedin', 'url_linkedin')),
     cargo: texto(pegar(c, 'cargo', 'role')),
     senioridade: texto(pegar(c, 'senioridade', 'seniority')),
     modalidade: texto(pegar(c, 'modalidade')),
@@ -97,16 +107,77 @@ export async function obterColaborador(id) {
   };
 }
 
-// % livre de um colaborador num mês (GET /busca/disponibilidade).
-// Retorna null quando o colaborador não aparece (sem planejamento).
+// ---------------------------------------------------------------------------
+// Disponibilidade mês a mês (GET /busca/disponibilidade?ano=&mes=)
+// ---------------------------------------------------------------------------
+
+// Aceita só número de verdade (ou texto numérico); ignora booleanos e textos.
+function numeroDe(valor) {
+  if (typeof valor === 'number' && Number.isFinite(valor)) return valor;
+  if (typeof valor === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(valor)) return Number(valor);
+  return null;
+}
+
+// Procura um campo numérico cujo nome combine com o padrão (ex.: "percentual_disponivel").
+function numeroPorNome(obj, padrao) {
+  for (const [chave, valor] of Object.entries(obj || {})) {
+    if (/^(id|ano|mes)/i.test(chave)) continue;
+    if (padrao.test(chave)) {
+      const n = numeroDe(valor);
+      if (n !== null) return n;
+    }
+  }
+  return null;
+}
+
+function percentualLivre(linha) {
+  for (const chave of ['disponivel', 'disponibilidade', 'percentual_livre', 'percentual_disponivel', 'livre', 'availability']) {
+    const n = numeroDe(linha?.[chave]);
+    if (n !== null) return n;
+  }
+  const porNome = numeroPorNome(linha, /dispon|livre|free|avail/i);
+  if (porNome !== null) return porNome;
+  // Se a API só informar quanto está ocupado, converte para % livre
+  const ocupado = numeroPorNome(linha, /ocupa|aloca|planej|usad|engaj/i);
+  return ocupado !== null ? Math.max(0, 100 - ocupado) : null;
+}
+
+// Disponibilidade de todos os colaboradores num mês: Map(id → % livre).
+export async function disponibilidadeDoMes(ano, mes) {
+  let resposta;
+  try {
+    resposta = await request(comParametros('/busca/disponibilidade', { ano, mes, limit: 1000 }));
+  } catch {
+    resposta = await request(comParametros('/busca/disponibilidade', { ano, mes }));
+  }
+  const mapa = new Map();
+  for (const linha of comoLista(resposta, 'colaboradores', 'disponibilidade')) {
+    const id = pegar(linha, 'id_colaborador', 'colaborador_id', 'colaboradorId', 'id');
+    const livre = percentualLivre(linha);
+    if (id !== undefined && livre !== null) mapa.set(String(id), Math.max(0, Math.min(100, livre)));
+  }
+  return mapa;
+}
+
+export function proximosMeses(quantidade, base = new Date()) {
+  return Array.from({ length: quantidade }, (_, i) => {
+    const d = new Date(base.getFullYear(), base.getMonth() + i, 1);
+    return { ano: d.getFullYear(), mes: d.getMonth() + 1 };
+  });
+}
+
+// Projeção dos próximos meses para todos os colaboradores, com uma chamada por mês.
+// Retorna { meses: [{ano, mes}], mapas: [Map | null] }.
+export async function projecaoDisponibilidade(quantidade = 4) {
+  const meses = proximosMeses(quantidade);
+  const mapas = await Promise.all(meses.map((m) => disponibilidadeDoMes(m.ano, m.mes).catch(() => null)));
+  return { meses, mapas };
+}
+
+// % livre de um colaborador num mês. Retorna null quando não há planejamento.
 export async function disponibilidadeNoMes(idColaborador, ano, mes) {
-  const r = await request(comParametros('/busca/disponibilidade', { ano, mes, limit: 1000 }));
-  const linha = comoLista(r, 'colaboradores', 'disponibilidade').find(
-    (l) => String(pegar(l, 'id_colaborador', 'id', 'colaboradorId')) === String(idColaborador)
-  );
-  if (!linha) return null;
-  const valor = Number(pegar(linha, 'disponivel', 'disponibilidade', 'percentual_livre', 'livre', 'availability'));
-  return Number.isFinite(valor) ? valor : null;
+  const mapa = await disponibilidadeDoMes(ano, mes);
+  return mapa.has(String(idColaborador)) ? mapa.get(String(idColaborador)) : null;
 }
 
 export const enviarEmail = ({ para, cc = [], assunto, mensagem }) =>

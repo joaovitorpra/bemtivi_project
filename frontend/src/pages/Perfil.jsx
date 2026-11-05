@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Mail, Briefcase, CalendarClock, Loader2, Send } from 'lucide-react';
-import { obterColaborador, disponibilidadeNoMes } from '../services/api';
+import { ArrowLeft, Mail, Briefcase, CalendarClock, Loader2, Send, Phone, Link2 } from 'lucide-react';
+import { obterColaborador, obterTalento, disponibilidadeNoMes } from '../services/api';
 import { Avatar } from '../components/Comum';
 
 const MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
@@ -28,11 +28,12 @@ function corLivre(livre) {
 }
 
 /**
- * Perfil de um colaborador interno.
- * `pessoa` é o candidato que veio da busca com IA (name, role, availability, skills...).
+ * Perfil de um profissional: colaborador interno ou talento externo.
+ * `pessoa` é o candidato que veio da busca com IA (name, role, source, availability, skills...).
  * O resto (e-mail, nível das skills, próximos meses) é carregado da API.
  */
-export default function Perfil({ pessoa, onVoltar, onAlocar }) {
+export default function Perfil({ pessoa, onVoltar, onAlocar, onContatar }) {
+  const externo = pessoa.source !== 'INTERNO';
   const [detalhe, setDetalhe] = useState(null);
   const [meses, setMeses] = useState(null);
 
@@ -40,9 +41,16 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
     let ativo = true;
     setDetalhe(null);
     setMeses(null);
-    obterColaborador(pessoa.id)
+    (externo ? obterTalento : obterColaborador)(pessoa.id)
       .then((d) => ativo && setDetalhe(d))
       .catch(() => ativo && setDetalhe({ erro: true }));
+    // Disponibilidade mês a mês só existe para quem é da equipe interna
+    if (externo) {
+      setMeses([]);
+      return () => {
+        ativo = false;
+      };
+    }
     const lista = proximosMeses(6);
     Promise.all(lista.map((m) => disponibilidadeNoMes(pessoa.id, m.ano, m.mes).catch(() => null))).then(
       (valores) => ativo && setMeses(lista.map((m, i) => ({ ...m, livre: valores[i] })))
@@ -50,7 +58,7 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
     return () => {
       ativo = false;
     };
-  }, [pessoa.id]);
+  }, [pessoa.id, externo]);
 
   const skills = detalhe?.skills?.length
     ? detalhe.skills
@@ -73,8 +81,12 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
         <div className="flex-1 space-y-2 min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-bold text-white">{pessoa.name}</h1>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide bg-purple-500/20 text-purple-300">
-              Banco Interno
+            <span
+              className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ${
+                externo ? 'bg-cyan-500/20 text-cyan-300' : 'bg-purple-500/20 text-purple-300'
+              }`}
+            >
+              {externo ? 'Banco de Talentos' : 'Banco Interno'}
             </span>
           </div>
           <p className="text-sm text-slate-400">
@@ -87,7 +99,19 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
                 {detalhe.email}
               </a>
             )}
-            {pessoa.currentProject && (
+            {detalhe?.telefone && (
+              <span className="inline-flex items-center gap-1.5">
+                <Phone className="w-3.5 h-3.5" />
+                {detalhe.telefone}
+              </span>
+            )}
+            {/^https?:\/\//.test(detalhe?.linkedin || '') && (
+              <a href={detalhe.linkedin} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-purple-300 hover:text-purple-200">
+                <Link2 className="w-3.5 h-3.5" />
+                LinkedIn
+              </a>
+            )}
+            {!externo && pessoa.currentProject && (
               <span className="inline-flex items-center gap-1.5">
                 <Briefcase className="w-3.5 h-3.5" />
                 Projeto atual: <strong className="text-white">{pessoa.currentProject}</strong>
@@ -102,11 +126,13 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
           </div>
         </div>
         <button
-          onClick={() => onAlocar(pessoa)}
-          className="bg-[#8B3DFF] hover:bg-[#7C2AE8] text-white px-5 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition cursor-pointer shrink-0"
+          onClick={() => (externo ? onContatar(pessoa) : onAlocar(pessoa))}
+          className={`text-white px-5 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition cursor-pointer shrink-0 ${
+            externo ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-[#8B3DFF] hover:bg-[#7C2AE8]'
+          }`}
         >
           <Send className="w-4 h-4" />
-          Alocar em projeto
+          {externo ? 'Contatar para contratar' : 'Alocar em projeto'}
         </button>
       </section>
 
@@ -114,9 +140,27 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
         {/* Disponibilidade */}
         <section className="lg:col-span-2 bg-[#110B22]/90 rounded-2xl p-6 border border-purple-500/20 space-y-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-sm font-bold text-white">Disponibilidade — próximos 6 meses</h2>
-            <span className="text-[11px] text-slate-400">% livre no mês</span>
+            <h2 className="text-sm font-bold text-white">
+              {externo ? 'Disponibilidade' : 'Disponibilidade — próximos 6 meses'}
+            </h2>
+            {!externo && <span className="text-[11px] text-slate-400">% livre no mês</span>}
           </div>
+
+          {externo && (
+            <div className="space-y-3 text-sm text-slate-300">
+              <p>
+                Disponível para começar: <strong className="text-emerald-400">{pessoa.freeDate || 'não informado'}</strong>
+              </p>
+              {typeof pessoa.availability === 'number' && (
+                <p>Dedicação informada: <strong className="text-white">{pessoa.availability}%</strong></p>
+              )}
+              {pessoa.reason && (
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  <strong className="text-purple-300">Análise da IA:</strong> {pessoa.reason}
+                </p>
+              )}
+            </div>
+          )}
 
           {meses === null && (
             <div className="flex items-center gap-2 text-xs text-slate-400 py-10 justify-center">
@@ -124,7 +168,7 @@ export default function Perfil({ pessoa, onVoltar, onAlocar }) {
             </div>
           )}
 
-          {meses !== null && !temMeses && (
+          {!externo && meses !== null && !temMeses && (
             <p className="text-xs text-slate-400 py-6">
               Sem planejamento lançado para os próximos meses.
               {typeof pessoa.availability === 'number' && (
